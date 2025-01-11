@@ -3,7 +3,6 @@ import Kernel, except: [apply: 2]
 defmodule Ecto.Query.Builder.Join do
   @moduledoc false
 
-  require Logger
   alias Ecto.Query.Builder
   alias Ecto.Query.{JoinExpr, QueryExpr}
 
@@ -16,57 +15,65 @@ defmodule Ecto.Query.Builder.Join do
   ## Examples
 
       iex> escape(quote(do: x in "foo"), [], __ENV__)
-      {:x, {"foo", nil}, nil, []}
+      {:x, {"foo", nil}, nil, nil, []}
 
       iex> escape(quote(do: "foo"), [], __ENV__)
-      {:_, {"foo", nil}, nil, []}
+      {:_, {"foo", nil}, nil, nil, []}
 
       iex> escape(quote(do: x in Sample), [], __ENV__)
-      {:x, {nil, Sample}, nil, []}
+      {:x, {nil, Sample}, nil, nil, []}
 
       iex> escape(quote(do: x in __MODULE__), [], __ENV__)
-      {:x, {nil, __MODULE__}, nil, []}
+      {:x, {nil, __MODULE__}, nil, nil, []}
 
       iex> escape(quote(do: x in {"foo", :sample}), [], __ENV__)
-      {:x, {"foo", :sample}, nil, []}
+      {:x, {"foo", :sample}, nil, nil, []}
 
       iex> escape(quote(do: x in {"foo", Sample}), [], __ENV__)
-      {:x, {"foo", Sample}, nil, []}
+      {:x, {"foo", Sample}, nil, nil, []}
 
       iex> escape(quote(do: x in {"foo", __MODULE__}), [], __ENV__)
-      {:x, {"foo", __MODULE__}, nil, []}
+      {:x, {"foo", __MODULE__}, nil, nil, []}
 
       iex> escape(quote(do: c in assoc(p, :comments)), [p: 0], __ENV__)
-      {:c, nil, {0, :comments}, []}
+      {:c, nil, {0, :comments}, nil, []}
 
       iex> escape(quote(do: x in fragment("foo")), [], __ENV__)
-      {:x, {:{}, [], [:fragment, [], [raw: "foo"]]}, nil, []}
+      {:x, {:{}, [], [:fragment, [], [raw: "foo"]]}, nil, nil, []}
 
   """
   @spec escape(Macro.t, Keyword.t, Macro.Env.t) :: {atom, Macro.t | nil, Macro.t | nil, list}
   def escape({:in, _, [{var, _, context}, expr]}, vars, env)
       when is_atom(var) and is_atom(context) do
-    {_, expr, assoc, params} = escape(expr, vars, env)
-    {var, expr, assoc, params}
+    {_, expr, assoc, prelude, params} = escape(expr, vars, env)
+    {var, expr, assoc, prelude, params}
   end
 
   def escape({:subquery, _, [expr]}, _vars, _env) do
-    {:_, quote(do: Ecto.Query.subquery(unquote(expr))), nil, []}
+    {:_, quote(do: Ecto.Query.subquery(unquote(expr))), nil, nil, []}
   end
 
   def escape({:subquery, _, [expr, opts]}, _vars, _env) do
-    {:_, quote(do: Ecto.Query.subquery(unquote(expr), unquote(opts))), nil, []}
+    {:_, quote(do: Ecto.Query.subquery(unquote(expr), unquote(opts))), nil, nil, []}
   end
 
   def escape({:fragment, _, [_ | _]} = expr, vars, env) do
     {expr, {params, _acc}} = Builder.escape(expr, :any, {[], %{}}, vars, env)
-    {:_, expr, nil, params}
+    {:_, expr, nil, nil, params}
+  end
+
+  def escape({:values, _, [values_list, types]}, _vars, _env) do
+    prelude = quote do: values = Ecto.Query.Values.new(unquote(values_list), unquote(types))
+    types = quote do: values.types
+    num_rows = quote do: values.num_rows
+    params = quote do: values.params
+    {:_, {:{}, [], [:values, [], [types, num_rows]]}, nil, prelude, params}
   end
 
   def escape({string, schema} = join, _vars, env) when is_binary(string) do
     case Macro.expand(schema, env) do
       schema when is_atom(schema) ->
-        {:_, {string, schema}, nil, []}
+        {:_, {string, schema}, nil, nil, []}
 
       _ ->
         Builder.error! "malformed join `#{Macro.to_string(join)}` in query expression"
@@ -78,19 +85,19 @@ defmodule Ecto.Query.Builder.Join do
     ensure_field!(field)
     var   = Builder.find_var!(var, vars)
     field = Builder.quoted_atom!(field, "field/2")
-    {:_, nil, {var, field}, []}
+    {:_, nil, {var, field}, nil, []}
   end
 
   def escape({:^, _, [expr]}, _vars, _env) do
-    {:_, quote(do: Ecto.Query.Builder.Join.join!(unquote(expr))), nil, []}
+    {:_, quote(do: Ecto.Query.Builder.Join.join!(unquote(expr))), nil, nil, []}
   end
 
   def escape(string, _vars, _env) when is_binary(string) do
-    {:_, {string, nil}, nil, []}
+    {:_, {string, nil}, nil, nil, []}
   end
 
   def escape(schema, _vars, _env) when is_atom(schema) do
-    {:_, {nil, schema}, nil, []}
+    {:_, {nil, schema}, nil, nil, []}
   end
 
   def escape(join, vars, env) do
@@ -121,7 +128,7 @@ defmodule Ecto.Query.Builder.Join do
   If possible, it does all calculations at compile time to avoid
   runtime work.
   """
-  @spec build(Macro.t, atom, [Macro.t], Macro.t, Macro.t, Macro.t, atom, nil | {:ok, String.t | nil}, nil | String.t | [String.t], Macro.Env.t) ::
+  @spec build(Macro.t, atom, [Macro.t], Macro.t, Macro.t, Macro.t, atom, nil | {:ok, Ecto.Schema.prefix}, nil | String.t | [String.t], Macro.Env.t) ::
               {Macro.t, Keyword.t, non_neg_integer | nil}
   def build(query, qual, binding, expr, count_bind, on, as, prefix, maybe_hints, env) do
     {:ok, prefix} = prefix || {:ok, nil}
@@ -137,7 +144,7 @@ defmodule Ecto.Query.Builder.Join do
     prefix = case prefix do
       nil -> nil
       prefix when is_binary(prefix) -> prefix
-      {:^, _, [prefix]} -> quote(do: Ecto.Query.Builder.From.prefix!(unquote(prefix)))
+      {:^, _, [prefix]} -> prefix
       prefix -> Builder.error!("`prefix` must be a compile time string or an interpolated value using ^, got: #{Macro.to_string(prefix)}")
     end
 
@@ -148,8 +155,8 @@ defmodule Ecto.Query.Builder.Join do
     end
 
     {query, binding} = Builder.escape_binding(query, binding, env)
-    {join_bind, join_source, join_assoc, join_params} = escape(expr, binding, env)
-    join_params = Builder.escape_params(join_params)
+    {join_bind, join_source, join_assoc, join_prelude, join_params} = escape(expr, binding, env)
+    join_params = escape_params(join_params)
 
     join_qual = validate_qual(qual)
     validate_bind(join_bind, binding)
@@ -189,13 +196,22 @@ defmodule Ecto.Query.Builder.Join do
     ]
 
     on = ensure_on(on, join_assoc, join_qual, join_source, env)
-    query = build_on(on, join, as, query, binding, count_bind, env)
+    query = build_on(on, join_prelude, join, as, query, binding, count_bind, env)
     {query, binding, next_bind}
   end
 
-  def build_on({:^, _, [var]}, join, as, query, _binding, count_bind, env) do
+  defp escape_params(params) when is_list(params) do
+    Builder.escape_params(params)
+  end
+
+  defp escape_params(params) do
+    quote do: Builder.escape_params(unquote(params))
+  end
+
+  def build_on({:^, _, [var]}, join_prelude, join, as, query, _binding, count_bind, env) do
     quote do
       query = unquote(query)
+      unquote(join_prelude)
 
       Ecto.Query.Builder.Join.join!(
         query,
@@ -209,7 +225,7 @@ defmodule Ecto.Query.Builder.Join do
     end
   end
 
-  def build_on(on, join, as, query, binding, count_bind, env) do
+  def build_on(on, join_prelude, join, as, query, binding, count_bind, env) do
     case Ecto.Query.Builder.Filter.escape(:on, on, count_bind, binding, env) do
       {_on_expr, {_on_params, %{subqueries: [_ | _]}}} ->
         raise ArgumentError, "invalid expression for join `:on`, subqueries aren't supported"
@@ -219,6 +235,8 @@ defmodule Ecto.Query.Builder.Join do
 
         join =
           quote do
+            unquote(join_prelude)
+
             %JoinExpr{
               unquote_splicing(join),
               on: %QueryExpr{
@@ -246,7 +264,7 @@ defmodule Ecto.Query.Builder.Join do
       end
 
     stacktrace = Macro.Env.stacktrace(env)
-    IO.warn("Missing `:on` in join#{maybe_source}, defaulting to `on: true`.", stacktrace)
+    IO.warn("missing `:on` in join#{maybe_source}, defaulting to `on: true`.", stacktrace)
 
     true
   end
