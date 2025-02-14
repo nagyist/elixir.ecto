@@ -167,17 +167,17 @@ query =
   from m in Movie,
   join: c in Character,
   on: m.id == c.movie_id,
-  preload: :characters
+  preload: [characters: c]
 Repo.all(query)
 ```
 
-#### Joing using `assoc`
+#### Join using `assoc`
 
 ```elixir
 query =
   from m in Movie,
   join: c in assoc(m, :characters),
-  preload: :characters
+  preload: [characters: c]
 Repo.all(query)
 ```
 
@@ -200,7 +200,7 @@ Repo.get_by!(Movie, title: "The Shawshank Redemption")
 params = %{"name" => "Red", "age" => 60}
 
 Repo.get_by!(Movie, title: "The Shawshank Redemption")
-|> Ecto.build_assoc(movie, :characters)
+|> Ecto.build_assoc(:characters)
 |> cast(params, [:name, :age])
 |> Repo.insert()
 ```
@@ -254,7 +254,7 @@ movie =
   |> Repo.preload(:screenplay)
 
 movie.screenplay
-|> change(%{lead_writter: "Frank Darabont"})
+|> change(%{lead_writer: "Frank Darabont"})
 |> Repo.update()
 ```
 
@@ -268,12 +268,12 @@ movie =
   |> Repo.preload(:characters)
 
 IO.inspect(movie.characters)
-#=> [%{name: "Andy Dufresne", age: 50},
-#=>  %{name: "Red", age: 60}]
+#=> [%Character{name: "Andy Dufresne", age: 50},
+#=>  %Character{name: "Red", age: 60}]
 
 characters =
-  Enum.map(characters, fn character ->
-    update_in(character.age, &(&1 + 1)))
+  Enum.map(movie.characters, fn character ->
+    change(character, age: character.age + 1)
   end)
 
 {:ok, movie} =
@@ -286,7 +286,7 @@ movie.characters |> Enum.map(&(&1.age)) |> IO.inspect
 #=> [51, 61]
 ```
 
-Note: the example above peforms the same operation on all entries,
+Note: the example above performs the same operation on all entries,
 therefore it can be written as a query. Queries should be preferred
 when possible as they avoid loading all data into memory and are
 more performant. See next example.
@@ -308,10 +308,13 @@ movie
 
 ```elixir
 # Params represent data from a form, API, CLI, etc
-params = [
-  %{"id" => 1, "name" => "Andy Dufresne"},
-  %{"name" => "Red", "age" => 60}
-]
+params = %{
+  "director" => "Frank Darabont",
+  "characters" => [
+    %{"id" => 1, "name" => "Andy Dufresne"},
+    %{"name" => "Red", "age" => 60}
+  ]
+}
 
 movie =
   Repo.get_by!(Movie, title: "The Shawshank Redemption")
@@ -322,12 +325,12 @@ IO.inspect(movie.characters)
 
 {:ok, movie} =
   movie
-  |> change()
-  |> cast_assoc(:characters, params)
-  |> Repo.update
+  |> cast(params, ["director"])
+  |> cast_assoc(:characters)
+  |> Repo.update()
 
 IO.inspect(movie.characters)
-#=> [%{id: 1, name: "Andy", age: 50},
+#=> [%{id: 1, name: "Andy Dufresne", age: 50},
 #=>  %{id: 2, name: "Red", age: 60}]
 ```
 
@@ -337,3 +340,5 @@ When using `Ecto.Changeset.cast_assoc/3`:
 * Existing entries with matching IDs are updated.
 * Existing entries without matching IDs will raise
   but it can be configured using `:on_replace`.
+* Additional options are supported to customize
+  casting, sorting, and deletion

@@ -64,8 +64,21 @@ defmodule Ecto.ParameterizedType do
         field :bar, MyApp.MyType, opt1: :baz, opt2: :boo
       end
 
+  To use this type in a schema field with a composite type, specify the type in a tuple
+  and opts afterwards.
+
+      schema "foo" do
+        field :bars, {:array, MyApp.MyType}, opt1: :baz, opt2: :boo
+      end
+
   To use this type in places where you need it to be initialized (for example,
   schemaless changesets), you can use `init/2`.
+
+  > #### `use Ecto.ParameterizedType` {: .info}
+  >
+  > When you `use Ecto.ParameterizedType`, it will set
+  > `@behaviour Ecto.ParameterizedType` and define default, overridable
+  > implementations for `c:embed_as/2` and `c:equal?/3`.
   """
 
   @typedoc """
@@ -82,7 +95,7 @@ defmodule Ecto.ParameterizedType do
   @type params :: term()
 
   @doc """
-  Callback to convert the options specified in  the field macro into parameters
+  Callback to convert the options specified in the field macro into parameters
   to be used in other callbacks.
 
   This function is called at compile time, and should raise if invalid values are
@@ -164,7 +177,7 @@ defmodule Ecto.ParameterizedType do
   @doc """
   Generates a loaded version of the data.
 
-  This is callback is invoked when a parameterized type is given
+  This callback is invoked when a parameterized type is given
   to `field` with the `:autogenerate` flag.
   """
   @callback autogenerate(params()) :: term()
@@ -187,7 +200,7 @@ defmodule Ecto.ParameterizedType do
   Useful when manually initializing a type for schemaless changesets.
   """
   def init(type, opts) do
-    {:parameterized, type, type.init(opts)}
+    {:parameterized, {type, type.init(opts)}}
   end
 
   @doc false

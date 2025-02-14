@@ -74,9 +74,9 @@ defmodule Ecto.Query.Builder.Select do
 
   # Map
   defp escape({:%{}, _, [{:|, _, [data, pairs]}]}, params_acc, vars, env) do
-    {data, params_acc} = escape(data, params_acc, vars, env)
-    {pairs, params_acc} = escape_pairs(pairs, params_acc, vars, env)
-    {{:{}, [], [:%{}, [], [{:{}, [], [:|, [], [data, pairs]]}]]}, params_acc}
+    {escaped_data, params_acc} = escape(data, params_acc, vars, env)
+    {pairs, params_acc} = escape_pairs(pairs, data, params_acc, vars, env)
+    {{:{}, [], [:%{}, [], [{:{}, [], [:|, [], [escaped_data, pairs]]}]]}, params_acc}
   end
 
   # Merge
@@ -93,7 +93,7 @@ defmodule Ecto.Query.Builder.Select do
 
   # Map
   defp escape({:%{}, _, pairs}, params_acc, vars, env) do
-    {pairs, params_acc} = escape_pairs(pairs, params_acc, vars, env)
+    {pairs, params_acc} = escape_pairs(pairs, nil, params_acc, vars, env)
     {{:{}, [], [:%{}, [], pairs]}, params_acc}
   end
 
@@ -112,15 +112,12 @@ defmodule Ecto.Query.Builder.Select do
   end
 
   # aliased values
-  defp escape({:selected_as, _, [expr, name]}, {params, acc}, vars, env) when is_atom(name) do
+  defp escape({:selected_as, _, [expr, name]}, {params, acc}, vars, env) do
+    name = Builder.quoted_atom!(name, "selected_as/2")
     {escaped, {params, acc}} = Builder.escape(expr, :any, {params, acc}, vars, env)
     expr = {:{}, [], [:selected_as, [], [escaped, name]]}
     aliases = Builder.add_select_alias(acc.aliases, name)
     {expr, {params, %{acc | aliases: aliases}}}
-  end
-
-  defp escape({:selected_as, _, [_expr, name]}, {_params, _acc}, _vars, _env) do
-    Builder.error! "selected_as/2 expects `name` to be an atom, got `#{inspect(name)}`"
   end
 
   defp escape(expr, params_acc, vars, env) do
@@ -131,16 +128,28 @@ defmodule Ecto.Query.Builder.Select do
     escape(expr, params_acc, vars, env)
   end
 
-  defp escape_pairs(pairs, params_acc, vars, env) do
+  defp escape_pairs(pairs, update_data, params_acc, vars, env) do
     Enum.map_reduce(pairs, params_acc, fn {k, v}, acc ->
+      v = tag_update_param(update_data, k, v)
       {k, acc} = escape_key(k, acc, vars, env)
       {v, acc} = escape(v, acc, vars, env)
       {{k, v}, acc}
     end)
   end
 
+  defp tag_update_param({var, _, context}, field, {:^, _,[_]} = param) when is_atom(var) and is_atom(context) do
+    {:type, [], [param, {{:., [], [{var, [], context}, field]}, [], []}]}
+  end
+
+  defp tag_update_param(_, _, value), do: value
+
   defp escape_key(k, params_acc, _vars, _env) when is_atom(k) do
     {k, params_acc}
+  end
+
+  defp escape_key({:^, _, [k]}, params_acc, _vars, _env) do
+    checked = quote do: Ecto.Query.Builder.Select.map_key!(unquote(k))
+    {checked, params_acc}
   end
 
   defp escape_key(k, params_acc, vars, env) do
@@ -175,6 +184,20 @@ defmodule Ecto.Query.Builder.Select do
       raise ArgumentError,
         "expected a list of fields in `#{tag}/2` inside `select`, got: `#{inspect fields}`"
     end
+  end
+
+  @doc """
+  Called at runtime to verify a map key
+  """
+  def map_key!(key) when is_binary(key), do: key
+  def map_key!(key) when is_integer(key), do: key
+  def map_key!(key) when is_float(key), do: key
+  def map_key!(key) when is_atom(key), do: key
+
+  def map_key!(other) do
+    Builder.error!(
+      "interpolated map keys in `:select` can only be atoms, strings or numbers, got: #{inspect(other)}"
+    )
   end
 
   # atom list sigils
@@ -296,7 +319,7 @@ defmodule Ecto.Query.Builder.Select do
     {expr, {params, acc}} = escape(expr, binding, env)
     params = Builder.escape_params(params)
     take = {:%{}, [], Map.to_list(acc.take)}
-    aliases = {:%{}, [], Map.to_list(acc.aliases)}
+    aliases = escape_aliases(acc.aliases)
 
     select = quote do: %Ecto.Query.SelectExpr{
                          expr: unquote(expr),
@@ -316,6 +339,9 @@ defmodule Ecto.Query.Builder.Select do
       end
     end
   end
+
+  defp escape_aliases(%{} = aliases), do: {:%{}, [], Map.to_list(aliases)}
+  defp escape_aliases(aliases), do: aliases
 
   @doc """
   The callback applied by `build/5` to build the query.
@@ -373,7 +399,7 @@ defmodule Ecto.Query.Builder.Select do
               {:merge, [], [old_expr, new_expr]}
           end
 
-        {{:map, meta, old_fields}, {:map, _, new_fields}} when old_params == [] ->
+        {{:map, meta, old_fields}, {:map, _, new_fields}} ->
           cond do
             old_fields == [] ->
               new_expr
@@ -381,11 +407,16 @@ defmodule Ecto.Query.Builder.Select do
             new_fields == [] ->
               old_expr
 
-            Keyword.keyword?(old_fields) and Keyword.keyword?(new_fields) ->
-              {:%{}, meta, Keyword.merge(old_fields, new_fields)}
-
             true ->
-              {:merge, [], [old_expr, new_expr]}
+              require_distinct_keys? = old_params != []
+
+              case merge_map_fields(old_fields, new_fields, require_distinct_keys?) do
+                fields when is_list(fields) ->
+                  {:%{}, meta, fields}
+
+                :error ->
+                  {:merge, [], [old_expr, new_expr]}
+              end
           end
 
         {_, {:map, _, _}} ->
@@ -412,7 +443,7 @@ defmodule Ecto.Query.Builder.Select do
       select | expr: expr,
                params: old_params ++ bump_subquery_params(new_params, old_subqueries),
                subqueries: old_subqueries ++ new_subqueries,
-               take: merge_take(query.from.source, old_expr, old_take, new_take),
+               take: merge_take(query, old_expr, old_take, new_take),
                aliases: merge_aliases(old_aliases, new_aliases)
     }
 
@@ -444,6 +475,35 @@ defmodule Ecto.Query.Builder.Select do
     :error
   end
 
+  defp merge_map_fields(old_fields, new_fields, false) do
+    if Keyword.keyword?(old_fields) and Keyword.keyword?(new_fields) do
+      Keyword.merge(old_fields, new_fields)
+    else
+      :error
+    end
+  end
+
+  defp merge_map_fields(old_fields, new_fields, true) when is_list(old_fields) do
+    if Keyword.keyword?(new_fields) do
+      valid? =
+        Enum.reduce_while(old_fields, true, fn
+          {k, _v}, _ when is_atom(k) ->
+            if Keyword.has_key?(new_fields, k),
+              do: {:halt, false},
+              else: {:cont, true}
+
+          _, _ ->
+            {:halt, false}
+        end)
+
+      if valid?, do: old_fields ++ new_fields, else: :error
+    else
+      :error
+    end
+  end
+
+  defp merge_map_fields(_, _, true), do: :error
+
   defp merge_argument_to_error({:&, _, [0]}, %{from: %{source: {source, alias}}}) do
     "source #{inspect(source || alias)}"
   end
@@ -470,7 +530,7 @@ defmodule Ecto.Query.Builder.Select do
     end)
   end
 
-  defp merge_take(source, old_expr, %{} = old_take, %{} = new_take) do
+  defp merge_take(query, old_expr, %{} = old_take, %{} = new_take) do
     Enum.reduce(new_take, old_take, fn {binding, {new_kind, new_fields} = new_value}, acc ->
       case acc do
         %{^binding => old_value} ->
@@ -480,12 +540,17 @@ defmodule Ecto.Query.Builder.Select do
           # If merging with a schema, add the schema's query fields. This comes in handy if the user
           # is merging fields with load_in_query = false.
           # If merging with a schemaless source, do nothing so the planner can take all the fields.
-          case {old_expr, source} do
-            {{:&, _, [^binding]}, {_source, schema}} when not is_nil(schema) ->
-              Map.put(acc, binding, {new_kind, Enum.uniq(new_fields ++ schema.__schema__(:query_fields))})
+          case old_expr do
+            {:&, _, [^binding]} ->
+              source = Enum.at([query.from | query.joins], binding).source
 
-            {{:&, _, [^binding]}, _} ->
-                acc
+              case source do
+                {_, schema} when schema != nil ->
+                  Map.put(acc, binding, {new_kind, Enum.uniq(new_fields ++ schema.__schema__(:query_fields))})
+
+                _ ->
+                  acc
+              end
 
             _ ->
               Map.put(acc, binding, new_value)
