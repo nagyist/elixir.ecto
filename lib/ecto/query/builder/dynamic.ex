@@ -13,7 +13,7 @@ defmodule Ecto.Query.Builder.Dynamic do
   def build(binding, expr, env) do
     {query, vars} = Builder.escape_binding(quote(do: query), binding, env)
     {expr, {params, acc}} = escape(expr, {[], %{subqueries: [], aliases: %{}}}, vars, env)
-    aliases = Builder.escape_select_aliases(acc.aliases)
+    aliases = escape_select_aliases(acc.aliases)
     params = Builder.escape_params(params)
 
     quote do
@@ -31,6 +31,10 @@ defmodule Ecto.Query.Builder.Dynamic do
     Select.escape(expr, vars, env)
   end
 
+  defp escape({:%{}, _, _} = expr, _params_acc, vars, env) do
+    Select.escape(expr, vars, env)
+  end
+
   defp escape(expr, params_acc, vars, env) do
     Builder.escape(expr, :any, params_acc, vars, {env, &escape_expansion/5})
   end
@@ -38,6 +42,9 @@ defmodule Ecto.Query.Builder.Dynamic do
   defp escape_expansion(expr, _type, params_acc, vars, env) do
     escape(expr, params_acc, vars, env)
   end
+
+  defp escape_select_aliases(%{} = aliases), do: Builder.escape_select_aliases(aliases)
+  defp escape_select_aliases(aliases), do: aliases
 
   @doc """
   Expands a dynamic expression for insertion into the given query.

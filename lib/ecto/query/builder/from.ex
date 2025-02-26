@@ -46,9 +46,16 @@ defmodule Ecto.Query.Builder.From do
 
   defp escape_source(query, env) do
     case Macro.expand_once(query, env) do
-      {:fragment, _, _} = fragment->
+      {:fragment, _, _} = fragment ->
         {fragment, {params, _acc}} = Builder.escape(fragment, :any, {[], %{}}, [], env)
         {fragment, Builder.escape_params(params)}
+
+      {:values, _, [values_list, types]} ->
+        prelude = quote do: values = Ecto.Query.Values.new(unquote(values_list), unquote(types))
+        types = quote do: values.types
+        num_rows = quote do: values.num_rows
+        params = quote do: Ecto.Query.Builder.escape_params(values.params)
+        {{:{}, [], [:values, [], [types, num_rows]]}, prelude, params}
 
       ^query ->
         case query do
@@ -60,8 +67,8 @@ defmodule Ecto.Query.Builder.From do
         escape_source(other, env)
     end
   end
-  
-  @typep hints :: [String.t() | {atom, term}]
+
+  @typep hints :: [String.t() | Macro.t()]
 
   @doc """
   Builds a quoted expression.
@@ -70,20 +77,15 @@ defmodule Ecto.Query.Builder.From do
   If possible, it does all calculations at compile time to avoid
   runtime work.
   """
-  @spec build(Macro.t(), Macro.Env.t(), atom, {:ok, String.t | nil} | nil, hints) ::
+  @spec build(Macro.t(), Macro.Env.t(), atom, {:ok, Ecto.Schema.prefix | nil} | nil, hints) ::
           {Macro.t(), Keyword.t(), non_neg_integer | nil}
   def build(query, env, as, prefix, hints) do
-    unless Enum.all?(hints, &is_valid_hint/1) do
-      Builder.error!(
-        "`hints` must be a compile time string, list of strings, a tuple, or a list of tuples " <>
-          "got: `#{Macro.to_string(hints)}`"
-      )
-    end
+    hints = Enum.map(hints, &hint!(&1))
 
     prefix = case prefix do
       nil -> nil
       {:ok, prefix} when is_binary(prefix) or is_nil(prefix) -> {:ok, prefix}
-      {:ok, {:^, _, [prefix]}} -> {:ok, quote(do: Ecto.Query.Builder.From.prefix!(unquote(prefix)))}
+      {:ok, {:^, _, [prefix]}} -> {:ok, prefix}
       {:ok, prefix} -> Builder.error!("`prefix` must be a compile time string or an interpolated value using ^, got: #{Macro.to_string(prefix)}")
     end
 
@@ -116,6 +118,18 @@ defmodule Ecto.Query.Builder.From do
         {:ok, prefix} = prefix || {:ok, nil}
         {query(prefix, fragment, params, as, hints, env.file, env.line), binds, 1}
 
+      {{:{}, _, [:values, _, _]} = values, prelude, params} ->
+        {:ok, prefix} = prefix || {:ok, nil}
+        query = query(prefix, values, params, as, hints, env.file, env.line)
+
+        quoted =
+          quote do
+            unquote(prelude)
+            unquote(query)
+          end
+
+        {quoted, binds, 1}
+
       _other ->
         quoted =
           quote do
@@ -139,16 +153,34 @@ defmodule Ecto.Query.Builder.From do
   end
 
   @doc """
-  Validates a prefix at runtime.
+  Validates hints at compile time and runtime
   """
-  @spec prefix!(any) :: nil | String.t()
-  def prefix!(prefix) when is_binary(prefix) or is_nil(prefix), do: prefix
-  def prefix!(prefix), do: raise("`prefix` must be a string, got: #{inspect(prefix)}")
+  def hint!(hint) when is_binary(hint), do: hint
+
+  def hint!({:unsafe_fragment, _, [fragment]}) do
+    case fragment do
+      {:^, _, [value]} ->
+        quote do: Ecto.Query.Builder.From.hint!(unquote(value))
+
+      _ ->
+        Builder.error!(
+          "`unsafe_fragment/1` in `hints` expects an interpolated value, such as " <>
+            "unsafe_fragment(^value), got: `#{Macro.to_string(fragment)}`"
+        )
+    end
+  end
+
+  def hint!(other) do
+    Builder.error!(
+      "`hints` must be a compile time string, unsafe fragment of the form `unsafe_fragment(^...)`, " <>
+        "or list containing either, got: `#{Macro.to_string(other)}`"
+    )
+  end
 
   @doc """
   The callback applied by `build/2` to build the query.
   """
-  @spec apply(Ecto.Queryable.t(), non_neg_integer, Macro.t(), {:ok, String.t} | nil, hints) :: Ecto.Query.t()
+  @spec apply(Ecto.Queryable.t(), non_neg_integer, Macro.t(), {:ok, Ecto.Schema.prefix} | nil, hints) :: Ecto.Query.t()
   def apply(query, binds, as, prefix, hints) do
     query =
       query
@@ -193,10 +225,6 @@ defmodule Ecto.Query.Builder.From do
 
   defp maybe_apply_hints(query, []), do: query
   defp maybe_apply_hints(query, hints), do: update_in(query.from.hints, &(&1 ++ hints))
-
-  defp is_valid_hint(hint) when is_binary(hint), do: true
-  defp is_valid_hint({_key, _val}), do: true
-  defp is_valid_hint(_), do: false
 
   defp check_binds(query, count) do
     if count > 1 and count > Builder.count_binds(query) do

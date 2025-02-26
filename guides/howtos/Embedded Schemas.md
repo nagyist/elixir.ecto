@@ -2,10 +2,9 @@
 
 Embedded schemas allow you to define and validate structured data. This data can live in memory, or can be stored in the database. Some use cases for embedded schemas include:
 
-- You are maintaining intermediate-state data, like when UI form fields map onto multiple tables in a database.
+- You are maintaining intermediate-state data, like when UI form fields map onto multiple tables in a database, or to model entities which are not backed by a database, such as a contact form
 
 - You are working within a persisted parent schema and you want to embed data that is...
-
   - simple, like a map of user preferences inside a User schema.
   - changes often, like a list of product images with associated structured data inside a Product schema.
   - requires complex tracking and validation, like an Address schema inside a User schema.
@@ -62,11 +61,11 @@ defmodule User do
 end
 ```
 
-Embedded schemas defined in such way are said to be defined inline, which:
+Embedded schemas defined in such way are said to be defined inline, which means that they are:
 
-- generating module in parent scope with the appropriate struct (for example above, module will be `User.Profile`)
-- persisted within parent schema
-- requiring to provide `with` option to `Ecto.Changeset.cast_embed/3`
+- generated as a module in the parent scope with the appropriate struct (for the example above, the module will be `User.Profile`)
+- persisted within the parent schema
+- required to provide the `with` option to `Ecto.Changeset.cast_embed/3`
 
 ### Extracting the embeds
 
